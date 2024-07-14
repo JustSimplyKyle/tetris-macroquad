@@ -1,0 +1,8 @@
+[package]
+name = "tetris-reimagined"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+macroquad = "0.4.11"
+strum = { version = "0.26.2", features = ["derive", "strum_macros"] }
