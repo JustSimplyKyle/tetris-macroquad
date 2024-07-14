@@ -1,4 +1,7 @@
-use std::{fmt::Display, mem::transmute};
+use std::{
+    fmt::Display,
+    hash::{DefaultHasher, Hash, Hasher},
+};
 
 use blocks::{BlockMode, RotatedState};
 use macroquad::prelude::*;
@@ -48,28 +51,31 @@ fn board_drawer(board: &Board, preview_sequence: &mut [BlockMode; 4]) {
 }
 
 fn random_block() -> BlockMode {
-    let pseudo_random = unsafe { transmute::<f64, u64>(get_time()) };
-    macroquad::rand::srand(pseudo_random);
+    let mut hash = DefaultHasher::new();
+    get_time().to_string().hash(&mut hash);
+    let seed = hash.finish();
+    macroquad::rand::srand(seed);
     let r = gen_range(0, blocks::BlockMode::iter().len());
     blocks::BlockMode::iter().nth(r).unwrap()
 }
 
-fn falling_to_finished(board: &mut Board, preview_sequence: &mut [BlockMode; 4]) {
+fn falling_to_finished(board: &mut Board, preview_sequence: &mut [BlockMode; 4]) -> Option<()> {
     board
         .iter_mut()
         .flat_map(|x| x.iter_mut())
         .filter(|x| x.is_falling())
         .for_each(|x| *x = BlockState::Occupied(OccupiedBlockStatus::Finished(x.get_color())));
     clear_lines(board);
-    random_insert_block(board, preview_sequence);
+    random_insert_block(board, preview_sequence)
 }
 
-fn random_insert_block(board: &mut Board, preview_sequence: &mut [BlockMode; 4]) {
-    insert_block(board, preview_sequence[0]);
+fn random_insert_block(board: &mut Board, preview_sequence: &mut [BlockMode; 4]) -> Option<()> {
+    insert_block(board, preview_sequence[0])?;
     preview_sequence.rotate_left(1);
     if let Some(last) = preview_sequence.last_mut() {
         *last = random_block();
     }
+    Some(())
 }
 
 fn clear_lines(board: &mut Board) {
@@ -94,10 +100,11 @@ async fn main() {
     let mut next_preview_piece: [BlockMode; 4] = std::array::from_fn(|_| random_block());
 
     random_insert_block(&mut board, &mut next_preview_piece);
-    let mut last_update_time = get_time();
-    let mut status = [false, false, false];
+    let mut gravity_delta = get_time();
+    let mut das_time = get_time();
+    let mut arr_time = get_time();
     loop {
-        // clear_background(RED);
+        let mut gravity_speed = 0.1;
         let dark_grey = Color::new(0.12, 0.17, 0.27, 1.);
         let grey = Color::new(0.25, 0.25, 0.32, 1.);
         clear_background(grey);
@@ -105,61 +112,60 @@ async fn main() {
         draw_rectangle(x, y, 10. * SIZE, 20. * SIZE, dark_grey);
 
         if board.last().unwrap().iter().any(|x| x.is_falling()) {
-            falling_to_finished(&mut board, &mut next_preview_piece);
+            if falling_to_finished(&mut board, &mut next_preview_piece).is_none() {
+                break;
+            }
         }
 
         // drawer and input handling
         // WARN: NO LOGIC BELOW
         board_drawer(&board, &mut next_preview_piece);
-        // printer(board);
 
         let keys = macroquad::input::get_keys_pressed();
         if keys.contains(&KeyCode::Left) {
-            status[0] = true;
+            // let _ = apply_movement(&mut board, Direction::Left);
         }
         if keys.contains(&KeyCode::Right) {
-            status[1] = true;
+            // let _ = apply_movement(&mut board, Direction::Right);
         }
         if keys.contains(&KeyCode::Up) {
-            status[2] = true;
+            rotate_block(&mut board);
+        }
+
+        if macroquad::input::get_keys_down().contains(&KeyCode::Down) {
+            gravity_speed = 0.03;
+        }
+
+        dbg!(gravity_speed);
+        dbg!(get_time() - das_time);
+
+        let keys = [
+            (KeyCode::Left, Direction::Left),
+            (KeyCode::Right, Direction::Right),
+        ];
+        for (key, direction) in keys {
+            if macroquad::input::get_keys_down().contains(&key) {
+                if get_time() - arr_time > 0.1 {
+                    let _ = apply_movement(&mut board, direction);
+                    arr_time = get_time();
+                }
+            }
+        }
+
+        if get_time() - gravity_delta > gravity_speed {
+            if apply_movement(&mut board, Direction::Down).is_err() {
+                if falling_to_finished(&mut board, &mut next_preview_piece).is_none() {
+                    break;
+                }
+            };
+            gravity_delta = get_time();
         }
 
         next_frame().await;
-
-        if get_time() - last_update_time < 0.1 {
-            continue;
-        }
-
-        apply_gravity(&mut board, &mut next_preview_piece);
-
-        if status[0] {
-            if macroquad::input::get_keys_down().contains(&KeyCode::Left) {
-                if apply_movement(&mut board, Direction::Left).is_err() {
-                    // falling_to_finished(&mut board);
-                };
-            } else {
-                status[0] = false;
-            }
-        }
-        if status[1] {
-            if macroquad::input::get_keys_down().contains(&KeyCode::Right) {
-                if apply_movement(&mut board, Direction::Right).is_err() {
-                    // falling_to_finished(&mut board);
-                };
-            } else {
-                status[1] = false;
-            }
-        }
-        if status[2] {
-            rotate_block(&mut board);
-        }
-        status[2] = false;
-
-        last_update_time = get_time();
     }
 }
 
-fn insert_block(board: &mut Board, block: BlockMode) {
+fn insert_block(board: &mut Board, block: BlockMode) -> Option<()> {
     let small_block = block.get_minimizied_board();
     for (ur, row) in board
         .iter_mut()
@@ -172,9 +178,13 @@ fn insert_block(board: &mut Board, block: BlockMode) {
         .enumerate()
     {
         for (uc, ock) in row.enumerate() {
+            if ock.is_finished() {
+                return None;
+            }
             *ock = small_block.get(ur, uc);
         }
     }
+    Some(())
 }
 
 fn rotate_block(board: &mut Board) {
@@ -265,12 +275,6 @@ fn rotate_block(board: &mut Board) {
             RotatedState::Left => rotater(0, 0),
         };
     }
-}
-
-fn apply_gravity(board: &mut Board, preview_sequence: &mut [BlockMode; 4]) {
-    if apply_movement(board, Direction::Down).is_err() {
-        falling_to_finished(board, preview_sequence);
-    };
 }
 
 enum Direction {
