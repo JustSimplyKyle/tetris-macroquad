@@ -117,17 +117,7 @@ async fn main() {
             }
         }
 
-        // drawer and input handling
-        // WARN: NO LOGIC BELOW
-        board_drawer(&board, &mut next_preview_piece);
-
         let keys = macroquad::input::get_keys_pressed();
-        if keys.contains(&KeyCode::Left) {
-            // let _ = apply_movement(&mut board, Direction::Left);
-        }
-        if keys.contains(&KeyCode::Right) {
-            // let _ = apply_movement(&mut board, Direction::Right);
-        }
         if keys.contains(&KeyCode::Up) {
             rotate_block(&mut board);
         }
@@ -136,19 +126,32 @@ async fn main() {
             gravity_speed = 0.03;
         }
 
-        dbg!(gravity_speed);
-        dbg!(get_time() - das_time);
-
-        let keys = [
+        let keys_direction = [
             (KeyCode::Left, Direction::Left),
             (KeyCode::Right, Direction::Right),
         ];
-        for (key, direction) in keys {
-            if macroquad::input::get_keys_down().contains(&key) {
-                if get_time() - arr_time > 0.1 {
-                    let _ = apply_movement(&mut board, direction);
-                    arr_time = get_time();
+        // das_time = get_time();
+        for (key, direction) in keys_direction {
+            if keys.contains(&key) {
+                das_time = get_time();
+                if keys.contains(&KeyCode::Left) {
+                    let _ = apply_movement(&mut board, Direction::Left);
                 }
+                if keys.contains(&KeyCode::Right) {
+                    let _ = apply_movement(&mut board, Direction::Right);
+                }
+            }
+            if (get_time() - das_time) > 0.3 {
+                dbg!("DAS CHARGED!");
+                if macroquad::input::get_keys_down().contains(&key) {
+                    if get_time() - arr_time > 0.1 {
+                        let _ = apply_movement(&mut board, direction);
+                        arr_time = get_time();
+                    }
+                }
+            } else {
+                arr_time = get_time() - 0.11;
+                dbg!("DAS CHARGING");
             }
         }
 
@@ -161,6 +164,7 @@ async fn main() {
             gravity_delta = get_time();
         }
 
+        board_drawer(&board, &mut next_preview_piece);
         next_frame().await;
     }
 }
