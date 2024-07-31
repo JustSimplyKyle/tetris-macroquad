@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+derive_more = "0.99.18"
 macroquad = "0.4.11"
 strum = { version = "0.26.2", features = ["derive", "strum_macros"] }

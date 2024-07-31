@@ -3,7 +3,7 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
 };
 
-use blocks::{BlockMode, RotatedState};
+use blocks::{Block, BlockMode, RotatedState};
 use macroquad::prelude::*;
 use rand::gen_range;
 use strum::IntoEnumIterator;
@@ -15,7 +15,7 @@ fn get_starting_pos() -> (f32, f32) {
     (screen_width() / 2. - 5. * SIZE, 100.)
 }
 
-fn board_drawer(board: &Board, preview_sequence: &mut [BlockMode; 4]) {
+fn board_drawer(board: &Board, preview_sequence: &mut [Block; 4]) {
     let (x, y) = get_starting_pos();
     for i in 0..board.len() {
         let row = board[i];
@@ -32,7 +32,7 @@ fn board_drawer(board: &Board, preview_sequence: &mut [BlockMode; 4]) {
         }
     }
     for (u, block) in preview_sequence.iter().enumerate() {
-        let color = BlockState::new_falling(*block).get_color();
+        let color = BlockState::new_falling(block.tetromino, block.state).get_color();
         let board = block.get_minimizied_board();
         for i in 0..board.len() {
             for j in 0..board.len() {
@@ -50,16 +50,16 @@ fn board_drawer(board: &Board, preview_sequence: &mut [BlockMode; 4]) {
     }
 }
 
-fn random_block() -> BlockMode {
+fn random_block() -> Block {
     let mut hash = DefaultHasher::new();
     get_time().to_string().hash(&mut hash);
     let seed = hash.finish();
     macroquad::rand::srand(seed);
     let r = gen_range(0, blocks::BlockMode::iter().len());
-    blocks::BlockMode::iter().nth(r).unwrap()
+    Block::new(blocks::BlockMode::iter().nth(r).unwrap(), RotatedState::Up)
 }
 
-fn falling_to_finished(board: &mut Board, preview_sequence: &mut [BlockMode; 4]) -> Option<()> {
+fn falling_to_finished(board: &mut Board, preview_sequence: &mut [Block; 4]) -> Option<()> {
     board
         .iter_mut()
         .flat_map(|x| x.iter_mut())
@@ -69,7 +69,7 @@ fn falling_to_finished(board: &mut Board, preview_sequence: &mut [BlockMode; 4])
     random_insert_block(board, preview_sequence)
 }
 
-fn random_insert_block(board: &mut Board, preview_sequence: &mut [BlockMode; 4]) -> Option<()> {
+fn random_insert_block(board: &mut Board, preview_sequence: &mut [Block; 4]) -> Option<()> {
     insert_block(board, preview_sequence[0])?;
     preview_sequence.rotate_left(1);
     if let Some(last) = preview_sequence.last_mut() {
@@ -97,7 +97,7 @@ fn clear_lines(board: &mut Board) {
 async fn main() {
     let mut board = [[BlockState::Empty; 10]; 20];
 
-    let mut next_preview_piece: [BlockMode; 4] = std::array::from_fn(|_| random_block());
+    let mut next_preview_piece: [Block; 4] = std::array::from_fn(|_| random_block());
 
     random_insert_block(&mut board, &mut next_preview_piece);
     let mut gravity_delta = get_time();
@@ -130,6 +130,7 @@ async fn main() {
             (KeyCode::Left, Direction::Left),
             (KeyCode::Right, Direction::Right),
         ];
+
         // das_time = get_time();
         for (key, direction) in keys_direction {
             if keys.contains(&key) {
@@ -142,7 +143,6 @@ async fn main() {
                 }
             }
             if (get_time() - das_time) > 0.3 {
-                dbg!("DAS CHARGED!");
                 if macroquad::input::get_keys_down().contains(&key) {
                     if get_time() - arr_time > 0.1 {
                         let _ = apply_movement(&mut board, direction);
@@ -151,7 +151,6 @@ async fn main() {
                 }
             } else {
                 arr_time = get_time() - 0.11;
-                dbg!("DAS CHARGING");
             }
         }
 
@@ -169,7 +168,7 @@ async fn main() {
     }
 }
 
-fn insert_block(board: &mut Board, block: BlockMode) -> Option<()> {
+fn insert_block(board: &mut Board, block: Block) -> Option<()> {
     let small_block = block.get_minimizied_board();
     for (ur, row) in board
         .iter_mut()
@@ -192,25 +191,28 @@ fn insert_block(board: &mut Board, block: BlockMode) -> Option<()> {
 }
 
 fn rotate_block(board: &mut Board) {
-    let (rotated_state, mut inner_block, board_len) = board
-        .iter()
-        .flat_map(|x| x.iter())
+    let (original_rotated_state, inner_block, board_len) = board
+        .iter_mut()
+        .flat_map(|x| x.iter_mut())
         .find_map(|x| match x {
             BlockState::Occupied(x) => match x {
-                OccupiedBlockStatus::Falling(x) => Some((
-                    x.get_rotated_state(),
-                    x.clone(),
-                    x.get_minimizied_board().len(),
-                )),
+                OccupiedBlockStatus::Falling(x) => {
+                    let len = x.get_minimizied_board().len();
+                    Some((x.state, x, len))
+                }
                 OccupiedBlockStatus::Finished(_) => None,
             },
             BlockState::Empty => None,
         })
         .unwrap();
+
     inner_block.rotate_right();
+
+    let inner_block = *inner_block;
+
     let rotated_block = inner_block.get_minimizied_board();
 
-    let mut rotater = |col_sub, row_sub| {
+    let mut rotater = move |col_sub, row_sub| {
         let col_skipping_count = board
             .iter()
             .skip_while(|x| !x.iter().any(|x| x.is_falling()))
@@ -226,32 +228,75 @@ fn rotate_block(board: &mut Board) {
             .iter()
             .position(|x| x.iter().any(|x| x.is_falling()))
             .and_then(|x| x.checked_sub(row_sub));
-        for (ur, row) in board
-            .iter_mut()
+        let mut blocks_tobe_removed = Vec::new();
+        for (x, (rx, row)) in board
+            .iter()
+            .enumerate()
             .skip(row_skipping_count.unwrap_or_default())
             .take(board_len)
-            .map(|row| {
-                row.iter_mut()
-                    .skip(
-                        col_skipping_count
-                            .and_then(|x| x.checked_sub(col_sub))
-                            .unwrap_or_default(),
-                    )
-                    .take(board_len)
-                    .enumerate()
+            .map(|(r, row)| {
+                (
+                    r,
+                    row.iter()
+                        .enumerate()
+                        .skip(
+                            col_skipping_count
+                                .and_then(|x| x.checked_sub(col_sub))
+                                .unwrap_or_default(),
+                        )
+                        .take(board_len)
+                        .enumerate(),
+                )
             })
             .enumerate()
         {
-            for (uc, block) in row {
+            for (y, (ry, block)) in row {
+                if block.is_finished() && rotated_block.get(x, y).is_falling() {
+                    return;
+                }
                 if !block.is_finished() {
-                    *block = rotated_block.get(ur, uc);
+                    blocks_tobe_removed.push((rx, ry));
                 }
             }
         }
+        let mut rotated = Vec::new();
+        for (x, (rx, row)) in board
+            .iter_mut()
+            .enumerate()
+            .skip(row_skipping_count.unwrap_or_default())
+            .take(board_len)
+            .map(|(rx, row)| {
+                (
+                    rx,
+                    row.iter_mut()
+                        .enumerate()
+                        .skip(
+                            col_skipping_count
+                                .and_then(|x| x.checked_sub(col_sub))
+                                .unwrap_or_default(),
+                        )
+                        .take(board_len)
+                        .enumerate(),
+                )
+            })
+            .enumerate()
+        {
+            for (y, (ry, block)) in row {
+                if (block.is_falling() || block.is_empty()) && rotated_block.get(x, y).is_falling()
+                {
+                    rotated.push((rx, ry));
+                    *block = rotated_block.get(x, y);
+                }
+            }
+        }
+        blocks_tobe_removed.retain(|x| !rotated.contains(x));
+        for (x, y) in blocks_tobe_removed {
+            board[x][y] = BlockState::Empty;
+        }
     };
 
-    if matches!(inner_block, BlockMode::I(_)) {
-        match rotated_state {
+    if matches!(inner_block.tetromino, BlockMode::I) {
+        match original_rotated_state {
             RotatedState::Up => {
                 rotater(0, 1);
             }
@@ -263,10 +308,10 @@ fn rotate_block(board: &mut Board) {
             }
             RotatedState::Left => rotater(1, 0),
         };
-    } else if matches!(inner_block, BlockMode::O(_)) {
+    } else if matches!(inner_block.tetromino, BlockMode::O) {
         rotater(0, 0);
     } else {
-        match rotated_state {
+        match original_rotated_state {
             RotatedState::Up => {
                 rotater(0, 0);
             }
@@ -416,15 +461,33 @@ mod blocks {
         }
     }
 
-    #[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct Block {
+        pub tetromino: BlockMode,
+        pub state: RotatedState,
+    }
+
+    impl Display for Block {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            self.tetromino.fmt(f)
+        }
+    }
+
+    impl Block {
+        pub const fn new(tetromino: BlockMode, state: RotatedState) -> Self {
+            Self { tetromino, state }
+        }
+    }
+
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, derive_more::Display)]
     pub enum BlockMode {
-        T(T),
-        I(I),
-        J(J),
-        L(L),
-        Z(Z),
-        S(S),
-        O(O),
+        T,
+        I,
+        J,
+        L,
+        Z,
+        S,
+        O,
     }
 
     pub enum BoardType {
@@ -468,272 +531,136 @@ mod blocks {
         }
     }
 
-    impl BlockMode {
+    impl Block {
         pub fn get_minimizied_board(&self) -> BoardType {
-            match self {
-                BlockMode::T(x) => x.get_minimizied_board().into(),
-                BlockMode::I(x) => x.get_minimizied_board().into(),
-                BlockMode::J(x) => x.get_minimizied_board().into(),
-                BlockMode::L(x) => x.get_minimizied_board().into(),
-                BlockMode::Z(x) => x.get_minimizied_board().into(),
-                BlockMode::S(x) => x.get_minimizied_board().into(),
-                BlockMode::O(x) => x.get_minimizied_board().into(),
-            }
-        }
-        pub fn get_rotated_state(&self) -> RotatedState {
-            match self {
-                Self::T(x) => x.state,
-                Self::I(x) => x.state,
-                Self::J(x) => x.state,
-                Self::L(x) => x.state,
-                Self::Z(x) => x.state,
-                Self::S(x) => x.state,
-                Self::O(x) => x.state,
-            }
-        }
-        pub fn get_mut_rotated_state(&mut self) -> &mut RotatedState {
-            match self {
-                Self::T(x) => &mut x.state,
-                Self::I(x) => &mut x.state,
-                Self::J(x) => &mut x.state,
-                Self::L(x) => &mut x.state,
-                Self::Z(x) => &mut x.state,
-                Self::S(x) => &mut x.state,
-                Self::O(x) => &mut x.state,
+            match self.tetromino {
+                BlockMode::T => {
+                    use BlockState as S;
+                    let make = S::new_falling(BlockMode::T, self.state);
+                    match self.state {
+                        RotatedState::Up => [
+                            [S::Empty, make, S::Empty],
+                            [make, make, make],
+                            [S::Empty, S::Empty, S::Empty],
+                        ],
+                        RotatedState::Right => [
+                            [S::Empty, make, S::Empty],
+                            [S::Empty, make, make],
+                            [S::Empty, make, S::Empty],
+                        ],
+                        RotatedState::Down => [
+                            [S::Empty, S::Empty, S::Empty],
+                            [make, make, make],
+                            [S::Empty, make, S::Empty],
+                        ],
+                        RotatedState::Left => [
+                            [S::Empty, make, S::Empty],
+                            [make, make, S::Empty],
+                            [S::Empty, make, S::Empty],
+                        ],
+                    }
+                }
+                .into(),
+                BlockMode::I => {
+                    use BlockState as S;
+                    let make = S::new_falling(BlockMode::I, self.state);
+                    match self.state {
+                        RotatedState::Up => [
+                            [S::Empty, S::Empty, S::Empty, S::Empty],
+                            [make, make, make, make],
+                            [S::Empty, S::Empty, S::Empty, S::Empty],
+                            [S::Empty, S::Empty, S::Empty, S::Empty],
+                        ],
+                        RotatedState::Right => [
+                            [S::Empty, S::Empty, make, S::Empty],
+                            [S::Empty, S::Empty, make, S::Empty],
+                            [S::Empty, S::Empty, make, S::Empty],
+                            [S::Empty, S::Empty, make, S::Empty],
+                        ],
+                        RotatedState::Down => [
+                            [S::Empty, S::Empty, S::Empty, S::Empty],
+                            [S::Empty, S::Empty, S::Empty, S::Empty],
+                            [make, make, make, make],
+                            [S::Empty, S::Empty, S::Empty, S::Empty],
+                        ],
+                        RotatedState::Left => [
+                            [S::Empty, make, S::Empty, S::Empty],
+                            [S::Empty, make, S::Empty, S::Empty],
+                            [S::Empty, make, S::Empty, S::Empty],
+                            [S::Empty, make, S::Empty, S::Empty],
+                        ],
+                    }
+                }
+                .into(),
+                BlockMode::J => {
+                    use BlockState as S;
+                    let make = S::new_falling(BlockMode::J, self.state);
+                    let e = S::Empty;
+                    match self.state {
+                        RotatedState::Up => [[make, e, e], [make, make, make], [e, e, e]],
+                        RotatedState::Right => [[e, make, make], [e, make, e], [e, make, e]],
+                        RotatedState::Down => [[e, e, e], [make, make, make], [e, e, make]],
+                        RotatedState::Left => [[e, make, e], [e, make, e], [make, make, e]],
+                    }
+                }
+                .into(),
+                BlockMode::L => {
+                    use BlockState as S;
+                    let make = S::new_falling(BlockMode::L, self.state);
+                    let e = S::Empty;
+                    match self.state {
+                        RotatedState::Up => [[e, e, make], [make, make, make], [e, e, e]],
+                        RotatedState::Right => [[e, make, e], [e, make, e], [e, make, make]],
+                        RotatedState::Down => [[e, e, e], [make, make, make], [make, e, e]],
+                        RotatedState::Left => [[make, make, e], [e, make, e], [e, make, e]],
+                    }
+                }
+                .into(),
+                BlockMode::Z => {
+                    use BlockState as S;
+                    let make = S::new_falling(BlockMode::Z, self.state);
+                    let e = S::Empty;
+                    match self.state {
+                        RotatedState::Up => [[e, make, make], [make, make, e], [e, e, e]],
+                        RotatedState::Right => [[e, make, e], [e, make, make], [e, e, make]],
+                        RotatedState::Down => [[e, e, e], [e, make, make], [make, make, e]],
+                        RotatedState::Left => [[make, e, e], [make, make, e], [e, make, e]],
+                    }
+                }
+                .into(),
+                BlockMode::S => {
+                    use BlockState as S;
+                    let make = S::new_falling(BlockMode::S, self.state);
+                    let e = S::Empty;
+                    match self.state {
+                        RotatedState::Up => [[make, make, e], [e, make, make], [e, e, e]],
+                        RotatedState::Right => [[e, e, make], [e, make, make], [e, make, e]],
+                        RotatedState::Down => [[e, e, e], [make, make, e], [e, make, make]],
+                        RotatedState::Left => [[e, make, e], [make, make, e], [make, e, e]],
+                    }
+                }
+                .into(),
+                BlockMode::O => {
+                    use BlockState as S;
+                    let make = S::new_falling(BlockMode::O, self.state);
+                    match self.state {
+                        RotatedState::Up => [[make; 2]; 2],
+                        RotatedState::Right => [[make; 2]; 2],
+                        RotatedState::Down => [[make; 2]; 2],
+                        RotatedState::Left => [[make; 2]; 2],
+                    }
+                }
+                .into(),
             }
         }
         pub fn rotate_right(&mut self) {
-            *self.get_mut_rotated_state() = match self.get_rotated_state() {
+            let next = match self.state {
                 RotatedState::Up => RotatedState::Right,
                 RotatedState::Right => RotatedState::Down,
                 RotatedState::Down => RotatedState::Left,
                 RotatedState::Left => RotatedState::Up,
             };
-        }
-    }
-
-    impl Display for BlockMode {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(
-                f,
-                "{}",
-                match self {
-                    Self::T(x) => x.to_string(),
-                    Self::I(x) => x.to_string(),
-                    Self::J(x) => x.to_string(),
-                    Self::L(x) => x.to_string(),
-                    Self::Z(x) => x.to_string(),
-                    Self::S(x) => x.to_string(),
-                    Self::O(x) => x.to_string(),
-                }
-            )
-        }
-    }
-
-    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-    pub struct T {
-        pub state: RotatedState,
-    }
-
-    impl Display for T {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "T")
-        }
-    }
-
-    impl T {
-        fn get_minimizied_board(&self) -> [[BlockState; 3]; 3] {
-            use BlockState as S;
-            let make = S::new_falling(BlockMode::T(*self));
-            match self.state {
-                RotatedState::Up => [
-                    [S::Empty, make, S::Empty],
-                    [make, make, make],
-                    [S::Empty, S::Empty, S::Empty],
-                ],
-                RotatedState::Right => [
-                    [S::Empty, make, S::Empty],
-                    [S::Empty, make, make],
-                    [S::Empty, make, S::Empty],
-                ],
-                RotatedState::Down => [
-                    [S::Empty, S::Empty, S::Empty],
-                    [make, make, make],
-                    [S::Empty, make, S::Empty],
-                ],
-                RotatedState::Left => [
-                    [S::Empty, make, S::Empty],
-                    [make, make, S::Empty],
-                    [S::Empty, make, S::Empty],
-                ],
-            }
-        }
-    }
-
-    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-    pub struct I {
-        pub state: RotatedState,
-    }
-
-    impl Display for I {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "I")
-        }
-    }
-
-    impl I {
-        fn get_minimizied_board(&self) -> [[BlockState; 4]; 4] {
-            use BlockState as S;
-            let make = S::new_falling(BlockMode::I(*self));
-            match self.state {
-                RotatedState::Up => [
-                    [S::Empty, S::Empty, S::Empty, S::Empty],
-                    [make, make, make, make],
-                    [S::Empty, S::Empty, S::Empty, S::Empty],
-                    [S::Empty, S::Empty, S::Empty, S::Empty],
-                ],
-                RotatedState::Right => [
-                    [S::Empty, S::Empty, make, S::Empty],
-                    [S::Empty, S::Empty, make, S::Empty],
-                    [S::Empty, S::Empty, make, S::Empty],
-                    [S::Empty, S::Empty, make, S::Empty],
-                ],
-                RotatedState::Down => [
-                    [S::Empty, S::Empty, S::Empty, S::Empty],
-                    [S::Empty, S::Empty, S::Empty, S::Empty],
-                    [make, make, make, make],
-                    [S::Empty, S::Empty, S::Empty, S::Empty],
-                ],
-                RotatedState::Left => [
-                    [S::Empty, make, S::Empty, S::Empty],
-                    [S::Empty, make, S::Empty, S::Empty],
-                    [S::Empty, make, S::Empty, S::Empty],
-                    [S::Empty, make, S::Empty, S::Empty],
-                ],
-            }
-        }
-    }
-
-    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-    pub struct J {
-        pub state: RotatedState,
-    }
-
-    impl Display for J {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "J")
-        }
-    }
-
-    impl J {
-        fn get_minimizied_board(&self) -> [[BlockState; 3]; 3] {
-            use BlockState as S;
-            let make = S::new_falling(BlockMode::J(*self));
-            let e = S::Empty;
-            match self.state {
-                RotatedState::Up => [[make, e, e], [make, make, make], [e, e, e]],
-                RotatedState::Right => [[e, make, make], [e, make, e], [e, make, e]],
-                RotatedState::Down => [[e, e, e], [make, make, make], [e, e, make]],
-                RotatedState::Left => [[e, make, e], [e, make, e], [make, make, e]],
-            }
-        }
-    }
-
-    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-    pub struct L {
-        pub state: RotatedState,
-    }
-
-    impl Display for L {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "L")
-        }
-    }
-
-    impl L {
-        fn get_minimizied_board(&self) -> [[BlockState; 3]; 3] {
-            use BlockState as S;
-            let make = S::new_falling(BlockMode::L(*self));
-            let e = S::Empty;
-            match self.state {
-                RotatedState::Up => [[e, e, make], [make, make, make], [e, e, e]],
-                RotatedState::Right => [[e, make, e], [e, make, e], [e, make, make]],
-                RotatedState::Down => [[e, e, e], [make, make, make], [make, e, e]],
-                RotatedState::Left => [[make, make, e], [e, make, e], [e, make, e]],
-            }
-        }
-    }
-
-    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-    pub struct Z {
-        pub state: RotatedState,
-    }
-
-    impl Display for Z {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "Z")
-        }
-    }
-
-    impl Z {
-        fn get_minimizied_board(&self) -> [[BlockState; 3]; 3] {
-            use BlockState as S;
-            let make = S::new_falling(BlockMode::Z(*self));
-            let e = S::Empty;
-            match self.state {
-                RotatedState::Up => [[e, make, make], [make, make, e], [e, e, e]],
-                RotatedState::Right => [[e, make, e], [e, make, make], [e, e, make]],
-                RotatedState::Down => [[e, e, e], [e, make, make], [make, make, e]],
-                RotatedState::Left => [[make, e, e], [make, make, e], [e, make, e]],
-            }
-        }
-    }
-
-    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-    pub struct S {
-        pub state: RotatedState,
-    }
-
-    impl Display for S {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "S")
-        }
-    }
-
-    impl S {
-        fn get_minimizied_board(&self) -> [[BlockState; 3]; 3] {
-            use BlockState as S;
-            let make = S::new_falling(BlockMode::S(*self));
-            let e = S::Empty;
-            match self.state {
-                RotatedState::Up => [[make, make, e], [e, make, make], [e, e, e]],
-                RotatedState::Right => [[e, e, make], [e, make, make], [e, make, e]],
-                RotatedState::Down => [[e, e, e], [make, make, e], [e, make, make]],
-                RotatedState::Left => [[e, make, e], [make, make, e], [make, e, e]],
-            }
-        }
-    }
-    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-    pub struct O {
-        pub state: RotatedState,
-    }
-
-    impl Display for O {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "O")
-        }
-    }
-
-    impl O {
-        fn get_minimizied_board(&self) -> [[BlockState; 2]; 2] {
-            use BlockState as S;
-            let make = S::new_falling(BlockMode::O(*self));
-            match self.state {
-                RotatedState::Up => [[make; 2]; 2],
-                RotatedState::Right => [[make; 2]; 2],
-                RotatedState::Down => [[make; 2]; 2],
-                RotatedState::Left => [[make; 2]; 2],
-            }
+            self.state = next;
         }
     }
 }
@@ -758,8 +685,8 @@ impl Display for BlockState {
 }
 
 impl BlockState {
-    pub const fn new_falling(s: BlockMode) -> Self {
-        Self::Occupied(OccupiedBlockStatus::Falling(s))
+    pub const fn new_falling(s: BlockMode, state: RotatedState) -> Self {
+        Self::Occupied(OccupiedBlockStatus::Falling(Block::new(s, state)))
     }
     pub fn is_occupied(&self) -> bool {
         matches!(self, Self::Occupied(_))
@@ -773,14 +700,14 @@ impl BlockState {
     pub fn get_color(&self) -> Color {
         match self {
             BlockState::Occupied(x) => match x {
-                OccupiedBlockStatus::Falling(x) => match x {
-                    BlockMode::T(_) => PURPLE,
-                    BlockMode::I(_) => SKYBLUE,
-                    BlockMode::J(_) => ORANGE,
-                    BlockMode::L(_) => BLUE,
-                    BlockMode::Z(_) => GREEN,
-                    BlockMode::S(_) => RED,
-                    BlockMode::O(_) => YELLOW,
+                OccupiedBlockStatus::Falling(x) => match x.tetromino {
+                    BlockMode::T => PURPLE,
+                    BlockMode::I => SKYBLUE,
+                    BlockMode::J => ORANGE,
+                    BlockMode::L => BLUE,
+                    BlockMode::Z => GREEN,
+                    BlockMode::S => RED,
+                    BlockMode::O => YELLOW,
                 },
                 OccupiedBlockStatus::Finished(x) => *x,
             },
@@ -811,7 +738,7 @@ impl BlockState {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum OccupiedBlockStatus {
-    Falling(BlockMode),
+    Falling(Block),
     Finished(Color),
 }
 
